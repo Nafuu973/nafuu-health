@@ -491,6 +491,64 @@ function applyProposal(p, pr, override) {
   p.programDirty = true;
 }
 
+/* ---------- Envoi par lien ---------- */
+
+const LINK_MAX = 60000;
+function bytesToB64url(bytes) {
+  let bin = ""; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function b64urlToBytes(t) {
+  const bin = atob(t.replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(bin, c => c.charCodeAt(0));
+}
+async function streamBytes(bytes, stream) {
+  const out = new Response(new Blob([bytes]).stream().pipeThrough(stream));
+  return new Uint8Array(await out.arrayBuffer());
+}
+async function makeDataLink(obj) {
+  const raw = new TextEncoder().encode(JSON.stringify(obj));
+  if (window.CompressionStream) return APP_URL + "#z=" + bytesToB64url(await streamBytes(raw, new CompressionStream("gzip")));
+  return APP_URL + "#d=" + bytesToB64url(raw);
+}
+async function readDataHash(hash) {
+  const m = /^#([zd])=([A-Za-z0-9_-]+)$/.exec(hash || "");
+  if (!m || m[2].length > LINK_MAX * 2) return null;
+  let bytes = b64urlToBytes(m[2]);
+  if (m[1] === "z") {
+    if (!window.DecompressionStream) throw new Error("Navigateur trop ancien");
+    bytes = await streamBytes(bytes, new DecompressionStream("gzip"));
+  }
+  if (bytes.length > MAX_IMPORT) throw new Error("Trop gros");
+  return new TextDecoder().decode(bytes);
+}
+async function importFromText(text) {
+  const m = /#[zd]=[A-Za-z0-9_-]+/.exec(String(text || ""));
+  if (!m) { const t = String(text || "").trim(); if (t.startsWith("{")) { handleImport(t); return true; } toast("Aucun lien Nafuu Health trouvé dans ce texte."); return false; }
+  try { const t = await readDataHash(m[0]); if (!t) throw new Error("vide"); handleImport(t); return true; }
+  catch (e) { toast("Lien illisible ou incomplet. Demande qu'on te le renvoie."); return false; }
+}
+/* Envoie par WhatsApp un message avec le lien. Trop gros : fichier en secours. */
+async function sendLink(obj, intro, phone, fileName) {
+  let link;
+  try { link = await makeDataLink(obj); } catch (e) { link = null; }
+  if (!link || link.length > LINK_MAX) { shareFile(fileName, obj, intro); return; }
+  const text = intro + "\n" + link;
+  if (phone && text.length <= 12000) { openWhatsApp(phone, text); return; }
+  if (navigator.share) { navigator.share({ text: text }).catch(() => {}); return; }
+  try { await navigator.clipboard.writeText(text); toast("Lien copié : colle-le dans WhatsApp."); } catch (e) { shareFile(fileName, obj, intro); }
+}
+function pasteView(params) {
+  let txt = "";
+  return screen(params.title || "Importer", null, [
+    h("p", { text: params.lead || "Dans WhatsApp, reste appuyé sur le message avec le lien, copie-le, puis colle-le ici." }),
+    field("Lien reçu", area("", v => { txt = v; }, 5)),
+    h("button", { class: "btn primary big", text: "Importer", onclick: () => { if (!txt.trim()) return toast("Colle d'abord le lien."); importFromText(txt); } }),
+    h("p", { class: "hint", text: "Tu as reçu un fichier .json à la place ?" }),
+    h("button", { class: "btn ghost", text: "Choisir un fichier", onclick: pickFile })
+  ]);
+};
+
 /* ---------- Invitation ---------- */
 
 const APP_URL = "https://nafuu973.github.io/nafuu-health/";
@@ -544,6 +602,7 @@ function readInvite() {
 /* ---------- Écrans ---------- */
 
 const VIEWS = {};
+VIEWS.paste = pasteView;
 
 VIEWS.welcome = function () {
   return screen("Nafuu Health", "Le suivi de tes séances, à la répétition.", [
@@ -648,7 +707,7 @@ VIEWS.paxHome = function () {
     kids.push(h("section", { class: "next" }, [
       h("p", { class: "next-n", text: "Pas encore de programme" }),
       h("p", { text: "Ton coach t'envoie un fichier sur WhatsApp. Ouvre-le avec Nafuu Health, ou enregistre-le dans ton téléphone puis importe-le ici." }),
-      h("button", { class: "btn primary big", text: "Importer mon programme", onclick: pickFile }),
+      h("button", { class: "btn primary big", text: "Importer mon programme", onclick: () => go("paste", { title: "Importer mon programme" }) }),
       h("button", { class: "btn ghost", text: "Essayer avec le programme type", onclick: () => importProgram(sampleProgram()) })
     ]));
   } else {
@@ -686,7 +745,7 @@ VIEWS.paxHome = function () {
     navRow("Mes séances", P.sessions.length ? P.sessions.length + " faites" : "Aucune pour l'instant", () => go("history")),
     navRow("Mesures", "Poids, tour de taille, pouls", () => go("measures")),
     navRow("Envoyer mon rapport au coach", newCount ? newCount + " nouveautés depuis le dernier envoi" : "Rien de nouveau", () => go("report"), newCount ? String(newCount) : null),
-    prog ? navRow("Importer un nouveau programme", "Quand ton coach t'en envoie un", pickFile) : null,
+    prog ? navRow("Importer un nouveau programme", "Si le lien de ton coach ne s'est pas ouvert tout seul", () => go("paste", { title: "Importer un programme" })) : null,
     P.coach && P.coach.phone && !P.announcedAt ? navRow("Prévenir mon coach que je suis prêt", "Un message WhatsApp en un appui", () => go("announce")) : null,
     navRow("Réglages", "Données, sauvegarde, effacement", () => go("paxSettings")),
     installRow()
@@ -983,15 +1042,17 @@ VIEWS.measures = function () {
   ]);
 };
 
-function buildReport() {
+function buildReport(since) {
   const P = S.pax;
+  const from = since ? new Date(new Date(since).getTime() - 14 * 86400000).toISOString() : "";
+  const recent = list => list.filter(x => !from || (x.date || "") >= from);
   return { type: "nafuu-rapport", v: 1, generatedAt: new Date().toISOString(), paxId: P.paxId || (P.paxId = uid()), profile: P.profile, consent: P.consent,
-    sessions: P.sessions, tests: P.tests, measures: P.measures, pains: P.pains };
+    sessions: recent(P.sessions), tests: P.tests, measures: recent(P.measures), pains: recent(P.pains) };
 }
 function sendReport(message) {
-  const P = S.pax, r = buildReport(); P.lastReportAt = r.generatedAt; save();
-  shareFile("rapport-" + (P.profile.firstName || "pax").toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-" + r.generatedAt.slice(0, 10) + ".json", r,
-    message || ("Rapport de " + (P.profile.firstName || "ton pax") + " pour Nafuu Health"));
+  const P = S.pax, since = P.lastReportAt, r = buildReport(since); P.lastReportAt = r.generatedAt; save();
+  sendLink(r, (message || ("Rapport de " + (P.profile.firstName || "ton pax"))) + " Ouvre le lien pour l'ajouter dans Nafuu Health :",
+    P.coach && P.coach.phone, "rapport-" + (P.profile.firstName || "pax").toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-" + r.generatedAt.slice(0, 10) + ".json");
 }
 VIEWS.sent = function (params) {
   const P = S.pax;
@@ -1075,7 +1136,7 @@ VIEWS.coachHome = function () {
   return screen("Tes pax", C.name, [
     h("div", { class: "row" }, [
       h("button", { class: "btn primary", text: "Ajouter un pax", onclick: () => go("coachAddPax") }),
-      h("button", { class: "btn ghost", text: "Importer un rapport", onclick: pickFile })
+      h("button", { class: "btn ghost", text: "Importer un rapport", onclick: () => go("paste", { title: "Importer un rapport", lead: "Dans WhatsApp, reste appuyé sur le message de ton pax, copie-le, puis colle-le ici." }) })
     ]),
     sorted.length ? h("nav", { class: "menu" }, sorted.map(p => {
       const al = paxAlerts(p);
@@ -1105,8 +1166,8 @@ function sendTest(p) {
   const file = { type: "nafuu-test", v: 1, issuedAt: new Date().toISOString(), message: (p.testMessage || "").slice(0, 1000),
     coach: { name: S.coach.name, phone: S.coach.phone }, pax: { id: p.id, name: p.name } };
   p.testSentAt = file.issuedAt; save();
-  shareFile("test-" + p.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") + ".json", file,
-    "Ton test de départ Nafuu Health. Ouvre le fichier avec Nafuu Health, fais le test puis envoie-moi le rapport.");
+  sendLink(file, "Ton test de départ : ouvre ce lien, il s'ouvre dans Nafuu Health. Fais le test puis envoie-moi le rapport.", p.phone,
+    "test-" + p.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") + ".json");
   render();
 }
 VIEWS.draft = function (params) {
@@ -1139,8 +1200,8 @@ function sendProgram(p) {
   const file = { type: "nafuu-programme", v: 1, issuedAt: new Date().toISOString(), message: (p.messageDraft || "").slice(0, 1000), coach: { name: S.coach.name, phone: S.coach.phone },
     pax: { id: p.id, name: p.name }, cycleWeeks: p.program.cycleWeeks, warmup: p.program.warmup, sessions: p.program.sessions, exercises: Object.values(used) };
   p.programSentAt = file.issuedAt; p.programDirty = false; save();
-  shareFile("programme-" + p.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") + ".json", file,
-    "Ton programme Nafuu Health" + (p.messageDraft ? " : " + p.messageDraft.slice(0, 300) : "") + ". Ouvre le fichier avec Nafuu Health.");
+  sendLink(file, "Ton programme" + (p.messageDraft ? " : " + p.messageDraft.slice(0, 300) : "") + ". Ouvre ce lien, il s'ouvre dans Nafuu Health :", p.phone,
+    "programme-" + p.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") + ".json");
 }
 
 VIEWS.coachPax = function (params) {
@@ -1423,7 +1484,24 @@ if (!NB && navigator.storage && navigator.storage.persist) { navigator.storage.p
 if (migrateCoachLibrary()) save();
 readInvite();
 home();
-window.addEventListener("hashchange", () => { if (/^#i=/.test(location.hash)) { readInvite(); home(); } });
+async function readDataLink() {
+  const h0 = location.hash || "";
+  if (!/^#[zd]=/.test(h0)) return;
+  history.replaceState(null, "", location.pathname + location.search);
+  if (isIOS() && !isInstalled()) {
+    // Sur iPhone, Safari et l'app installée ne partagent pas leurs données.
+    stack = []; go("iosLink", { link: APP_URL + h0 }); return;
+  }
+  await importFromText(h0);
+}
+VIEWS.iosLink = function (params) {
+  return screen("Ouvre-le dans l'app", null, [
+    h("p", { text: "Sur iPhone, ce lien s'est ouvert dans Safari, pas dans Nafuu Health. Copie-le, ouvre l'app depuis son icône, puis colle-le dans Importer." }),
+    h("button", { class: "btn primary big", text: "Copier le lien", onclick: () => navigator.clipboard.writeText(params.link).then(() => toast("Lien copié. Ouvre Nafuu Health et colle-le."), () => toast("Copie impossible : reste appuyé sur le lien dans WhatsApp pour le copier.")) })
+  ], { noBack: true });
+};
+readDataLink();
+window.addEventListener("hashchange", () => { if (/^#i=/.test(location.hash)) { readInvite(); home(); } else if (/^#[zd]=/.test(location.hash)) readDataLink(); });
 if (!NB && /[?&]partage=1/.test(location.search) && window.caches) {
   history.replaceState(null, "", location.pathname);
   caches.open("nafuu-health-partage").then(c => c.match("./fichier-recu").then(r => r ? r.text().then(t => { c.delete("./fichier-recu"); handleImport(t); }) : null)).catch(() => {});
