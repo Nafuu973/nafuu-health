@@ -1,6 +1,6 @@
 "use strict";
 /* Service worker : l'app marche sans réseau, et reçoit les fichiers partagés depuis WhatsApp (Android). */
-const VERSION = "nafuu-health-v1";
+const VERSION = "nafuu-health-v2";
 const SHELL = [
   "./", "./index.html", "./app.css", "./app.js", "./data.js", "./manifest.webmanifest",
   "./fonts/DejaVuSans.ttf", "./fonts/DejaVuSans-Bold.ttf",

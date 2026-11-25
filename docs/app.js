@@ -326,13 +326,14 @@ function cleanDoneSession(s) {
       sets: arr(i.sets, 60).map(x => ({ side: x.side === "G" || x.side === "D" ? x.side : null, value: num(x.value) || 0, effort: num(x.effort), clean: x.clean !== false, done: !!x.done })) })) };
 }
 function cleanPain(p) { return { id: str(p.id, 40), date: str(p.date, 40), zone: str(p.zone, 40), intensity: num(p.intensity), context: str(p.context, 160), comment: str(p.comment, 600) }; }
+const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 function cleanValues(v) {
   const out = {};
   if (!v || typeof v !== "object") return out;
   Object.keys(v).slice(0, 80).forEach(k => {
-    const t = v[k]; if (!t || typeof t !== "object") return;
+    const t = v[k]; if (!t || typeof t !== "object" || FORBIDDEN_KEYS.has(k)) return;
     const o = {};
-    Object.keys(t).slice(0, 30).forEach(f => { const x = t[f]; o[str(f, 30)] = typeof x === "boolean" ? x : typeof x === "number" ? x : str(x, 300); });
+    Object.keys(t).slice(0, 30).forEach(f => { if (FORBIDDEN_KEYS.has(f)) return; const x = t[f]; o[str(f, 30)] = typeof x === "boolean" ? x : typeof x === "number" ? x : str(x, 300); });
     out[str(k, 40)] = o;
   });
   return out;
@@ -343,7 +344,10 @@ function mergeById(target, incoming) {
 
 function importBackup(o) {
   const data = o.data;
-  if (!data || typeof data !== "object" || !["coach", "pax"].includes(data.role)) { toast("Sauvegarde illisible."); return; }
+  const okShape = data && typeof data === "object" && ["coach", "pax"].includes(data.role) &&
+    (data.role === "coach" ? data.coach && Array.isArray(data.coach.pax) && Array.isArray(data.coach.exercises)
+                           : data.pax && typeof data.pax.profile === "object" && Array.isArray(data.pax.sessions));
+  if (!okShape) { toast("Sauvegarde illisible."); return; }
   confirmSheet("Restaurer cette sauvegarde ?", "Elle remplace toutes les données actuelles de l'app sur ce téléphone.", "Restaurer", () => {
     S = data; save(); toast("Sauvegarde restaurée."); home();
   }, true);
