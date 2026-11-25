@@ -1,6 +1,6 @@
 "use strict";
 /* Service worker : l'app marche sans réseau, et reçoit les fichiers partagés depuis WhatsApp (Android). */
-const VERSION = "nafuu-health-v7";
+const VERSION = "nafuu-health-v8";
 const SHELL = [
   "./", "./index.html", "./app.css", "./app.js", "./data.js", "./smart.js", "./manifest.webmanifest",
   "./fonts/DejaVuSans.ttf", "./fonts/DejaVuSans-Bold.ttf",
@@ -10,7 +10,10 @@ const SHARE_CACHE = "nafuu-health-partage";
 const MAX_SHARE = 2 * 1024 * 1024;
 
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // cache: "reload" : on contourne le cache HTTP du navigateur, sinon une ancienne version peut être reprise.
+  e.waitUntil(caches.open(VERSION).then((c) => Promise.all(SHELL.map((u) =>
+    fetch(new Request(u, { cache: "reload" })).then((r) => { if (!r.ok) throw new Error(u); return c.put(u, r); })
+  ))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener("activate", (e) => {

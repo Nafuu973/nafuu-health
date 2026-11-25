@@ -1406,7 +1406,18 @@ VIEWS.install = function () {
 /* ---------- Démarrage ---------- */
 
 if (!NB && "serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "127.0.0.1" || location.hostname === "localhost")) {
-  navigator.serviceWorker.register("sw.js").catch(() => {});
+  navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).then(reg => {
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") reg.update().catch(() => {}); });
+  }).catch(() => {});
+  // Nouvelle version installée : on recharge tout de suite, sauf pendant une séance ou un test.
+  let hadController = !!navigator.serviceWorker.controller, reloading = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!hadController) { hadController = true; return; }
+    if (reloading) return;
+    const v = stack.length ? stack[stack.length - 1].view : "";
+    if (v === "session" || v === "test") { toast("Nouvelle version prête : elle s'appliquera à la prochaine ouverture."); return; }
+    reloading = true; location.reload();
+  });
 }
 if (!NB && navigator.storage && navigator.storage.persist) { navigator.storage.persist().catch(() => {}); }
 if (migrateCoachLibrary()) save();
