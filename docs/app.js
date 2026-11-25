@@ -71,14 +71,15 @@ function save() {
 /* ---------- Pont avec Android ---------- */
 
 const NB = window.NafuuBridge || null;
-function shareFile(name, obj) {
+function shareFile(name, obj, message) {
   const text = JSON.stringify(obj);
-  if (NB) { NB.shareFile(name, text); return; }
+  const msg = String(message || "").slice(0, 500);
+  if (NB) { NB.shareFile(name, text, msg); return; }
   const blob = new Blob([text], { type: "application/json" });
   let file = null;
   try { file = new File([blob], name, { type: "application/json" }); } catch (e) { file = null; }
   if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
-    navigator.share({ files: [file], title: name }).catch(err => { if (err && err.name !== "AbortError") download(blob, name); });
+    navigator.share(msg ? { files: [file], title: name, text: msg } : { files: [file], title: name }).catch(err => { if (err && err.name !== "AbortError") download(blob, name); });
     return;
   }
   download(blob, name);
@@ -279,7 +280,7 @@ function cleanSessionTpl(s) {
 function importProgram(o) {
   if (S.role === "coach") { toast("Ce fichier est un programme pour un pax. Ouvre-le sur son téléphone."); return; }
   const prog = {
-    issuedAt: str(o.issuedAt, 40), cycleWeeks: Math.max(1, Math.min(52, num(o.cycleWeeks) || 4)),
+    issuedAt: str(o.issuedAt, 40), message: str(o.message, 1000), cycleWeeks: Math.max(1, Math.min(52, num(o.cycleWeeks) || 4)),
     warmup: arr(o.warmup, 30).map(x => str(x, 160)), sessions: arr(o.sessions, 40).map(cleanSessionTpl),
     exercises: arr(o.exercises, 300).map(cleanExercise)
   };
@@ -532,6 +533,13 @@ VIEWS.paxHome = function () {
       ])))
     ]));
   }
+  if (prog && prog.message) {
+    kids.push(h("section", { class: "info" }, [
+      h("h2", { text: "Message de " + (P.coach && P.coach.name ? P.coach.name : "ton coach") }),
+      h("p", { text: prog.message }),
+      h("p", { class: "hint", text: "Reçu le " + frDate(prog.issuedAt) })
+    ]));
+  }
   const t = P.tests.length ? P.tests[P.tests.length - 1] : null;
   const newCount = P.sessions.filter(s => !P.lastReportAt || s.date > P.lastReportAt).length + P.tests.filter(x => !P.lastReportAt || x.date > P.lastReportAt).length;
   kids.push(h("nav", { class: "menu" }, [
@@ -658,7 +666,7 @@ function sessionEnd(C) {
       const k = nums.indexOf(C.num);
       S.pax.nextNum = nums[(k + 1) % nums.length];
       S.pax.current = null; save(); keepAwake(false);
-      toast("Séance enregistrée."); home();
+      stack = []; go("sent", { title: "Séance enregistrée", message: "Séance " + rec.num + " (" + rec.lieu + ") faite" + (rec.feeling !== null ? ", ressenti " + rec.feeling + "/10" : "") + "." });
     } })
   ] });
 }
@@ -789,7 +797,8 @@ function testEnd() {
     h("button", { class: "btn ghost", text: "Revoir le dernier test", onclick: () => { D.idx -= 1; save(); render(); } }),
     h("button", { class: "btn primary", text: "Enregistrer le test", onclick: () => {
       S.pax.tests.push({ id: D.id, date: new Date().toISOString(), blocked: false, skipped: D.skipped, values: D.values });
-      S.pax.testDraft = null; save(); toast("Test enregistré."); home();
+      S.pax.testDraft = null; save();
+      stack = []; go("sent", { title: "Test enregistré", message: "Test de départ fait." });
     } })
   ] });
 }
@@ -838,14 +847,29 @@ function buildReport() {
   return { type: "nafuu-rapport", v: 1, generatedAt: new Date().toISOString(), paxId: P.paxId || (P.paxId = uid()), profile: P.profile, consent: P.consent,
     sessions: P.sessions, tests: P.tests, measures: P.measures, pains: P.pains };
 }
+function sendReport(message) {
+  const P = S.pax, r = buildReport(); P.lastReportAt = r.generatedAt; save();
+  shareFile("rapport-" + (P.profile.firstName || "pax").toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-" + r.generatedAt.slice(0, 10) + ".json", r,
+    message || ("Rapport de " + (P.profile.firstName || "ton pax") + " pour Nafuu Health"));
+}
+VIEWS.sent = function (params) {
+  const P = S.pax;
+  return screen(params.title, null, [
+    h("p", { text: "Envoie-le maintenant à ton coach : il verra ta progression et pourra ajuster ton programme." }),
+    h("p", { class: "hint", text: "Choisis WhatsApp puis la conversation avec ton coach." }),
+    P.coach && P.coach.name ? h("p", { class: "hint", text: "Coach : " + P.coach.name }) : null
+  ], { noBack: true, foot: [
+    h("button", { class: "btn ghost", text: "Plus tard", onclick: home }),
+    h("button", { class: "btn primary", text: "Envoyer à mon coach", onclick: () => { sendReport(params.message); home(); } })
+  ] });
+};
 VIEWS.report = function () {
   const P = S.pax;
   return screen("Envoyer mon rapport", null, [
     h("p", { text: "Le rapport contient tes séances, tes tests, tes mesures et les douleurs signalées. Choisis WhatsApp puis la conversation avec ton coach." }),
     P.lastReportAt ? h("p", { class: "hint", text: "Dernier envoi : " + frDate(P.lastReportAt) }) : null
   ], { foot: [h("button", { class: "btn primary big", text: "Envoyer le rapport", onclick: () => {
-    const r = buildReport(); P.lastReportAt = r.generatedAt; save();
-    shareFile("rapport-" + (P.profile.firstName || "pax").toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-" + r.generatedAt.slice(0, 10) + ".json", r);
+    sendReport();
   } })] });
 };
 
@@ -931,10 +955,11 @@ VIEWS.coachAddPax = function () {
 function sendProgram(p) {
   const exs = coachEx(), used = {};
   p.program.sessions.forEach(s => s.items.forEach(i => { if (exs[i.exId]) used[i.exId] = exs[i.exId]; }));
-  const file = { type: "nafuu-programme", v: 1, issuedAt: new Date().toISOString(), coach: { name: S.coach.name, phone: S.coach.phone },
+  const file = { type: "nafuu-programme", v: 1, issuedAt: new Date().toISOString(), message: (p.messageDraft || "").slice(0, 1000), coach: { name: S.coach.name, phone: S.coach.phone },
     pax: { id: p.id, name: p.name }, cycleWeeks: p.program.cycleWeeks, warmup: p.program.warmup, sessions: p.program.sessions, exercises: Object.values(used) };
   p.programSentAt = file.issuedAt; p.programDirty = false; save();
-  shareFile("programme-" + p.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") + ".json", file);
+  shareFile("programme-" + p.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") + ".json", file,
+    "Ton programme Nafuu Health" + (p.messageDraft ? " : " + p.messageDraft.slice(0, 300) : "") + ". Ouvre le fichier avec Nafuu Health.");
 }
 
 VIEWS.coachPax = function (params) {
@@ -950,12 +975,17 @@ VIEWS.coachPax = function (params) {
     h("section", null, [
       h("h2", { text: "Programme" }),
       h("p", { class: "hint", text: p.programSentAt ? (p.programDirty ? "Modifié depuis le dernier envoi du " + frDate(p.programSentAt) : "Envoyé le " + frDate(p.programSentAt)) : "Jamais envoyé" }),
+      field("Message joint au programme", area(p.messageDraft || "", v => { p.messageDraft = v.slice(0, 1000); save(); }, 3), "Il s'affiche sur l'accueil de ton pax quand il ouvre le programme."),
       h("div", { class: "row" }, [
         h("button", { class: "btn ghost", text: "Modifier", onclick: () => go("programEdit", { id: p.id }) }),
         h("button", { class: "btn primary", text: "Envoyer le programme", onclick: () => sendProgram(p) })
       ])
     ]),
-    pend.length ? h("section", null, [h("h2", { text: "Progressions à valider" })].concat(pend.map(pr => proposalCard(p, pr)))) : null,
+    pend.length ? h("section", null, [h("h2", { text: "Progressions à valider" }),
+      pend.length > 1 ? h("button", { class: "btn primary", text: "Tout valider (" + pend.length + ")", onclick: () => {
+        pend.forEach(pr => { applyProposal(p, pr, null); pr.status = "accepted"; p.decided.push(pr.key); });
+        save(); toast("Tout est validé. Pense à renvoyer le programme."); render();
+      } }) : null].concat(pend.map(pr => proposalCard(p, pr)))) : null,
     h("section", null, [
       h("h2", { text: "Séances" }),
       p.sessions.length ? h("nav", { class: "menu" }, p.sessions.slice().sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 12).map(s =>
@@ -966,6 +996,11 @@ VIEWS.coachPax = function (params) {
       h("li", { text: shortDate(x.date) + ", " + x.zone + (x.intensity !== null ? ", " + x.intensity + "/10" : "") + (x.context ? ", " + x.context : "") + (x.comment ? ". " + x.comment : "") })))]) : null,
     p.measures.length ? h("section", null, [h("h2", { text: "Mesures" }), h("ul", { class: "list" }, p.measures.slice().reverse().slice(0, 10).map(m =>
       h("li", { text: shortDate(m.date) + " : " + [m.poids ? m.poids + " kg" : "", m.tour ? "taille " + m.tour + " cm" : "", m.pouls ? "pouls " + m.pouls : ""].filter(Boolean).join(", ") })))]) : null,
+    h("section", null, [
+      h("h2", { text: "Contact" }),
+      field("WhatsApp de " + p.name, input("tel", p.phone ? "+" + p.phone : "", v => { let d = v.replace(/[^\d+]/g, ""); if (d.startsWith("0")) d = "33" + d.slice(1); p.phone = d.replace(/\D/g, "").slice(0, 15); save(); }, { inputmode: "tel", placeholder: "+33 6 12 34 56 78" })),
+      h("button", { class: "btn ghost", text: "Écrire sur WhatsApp", onclick: () => openWhatsApp(p.phone, "") })
+    ]),
     h("section", null, [h("h2", { text: "Notes privées" }), h("p", { class: "hint", text: "Jamais envoyées au pax." }), notes]),
     h("button", { class: "link danger", text: "Supprimer ce pax et ses données", onclick: () => confirmSheet("Supprimer " + p.name + " ?", "Son programme, ses rapports, ses tests et tes notes seront effacés de ce téléphone.", "Supprimer", () => {
       S.coach.pax = S.coach.pax.filter(x => x.id !== p.id); save(); back();

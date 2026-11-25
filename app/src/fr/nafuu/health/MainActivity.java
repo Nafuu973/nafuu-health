@@ -262,7 +262,7 @@ public class MainActivity extends Activity {
 
     private class Bridge {
         @JavascriptInterface
-        public void shareFile(String name, String content) {
+        public void shareFile(String name, String content, String message) {
             if (content == null || content.length() > 8 * 1024 * 1024) return;
             String safe = name == null ? "" : name.toLowerCase().replaceAll("[^a-z0-9._-]", "-");
             if (safe.isEmpty() || safe.length() > 120 || !safe.endsWith(".json")) safe = "nafuu-health.json";
@@ -280,6 +280,7 @@ public class MainActivity extends Activity {
                     Intent send = new Intent(Intent.ACTION_SEND);
                     send.setType("application/json");
                     send.putExtra(Intent.EXTRA_STREAM, uri);
+                    if (message != null && !message.isEmpty()) send.putExtra(Intent.EXTRA_TEXT, message.length() > 500 ? message.substring(0, 500) : message);
                     send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                     Intent chooser = Intent.createChooser(send, "Envoyer avec");
                     chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
