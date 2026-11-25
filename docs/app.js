@@ -269,6 +269,7 @@ function handleImport(text) {
   try { o = JSON.parse(text); } catch (e) { toast("Ce fichier n'est pas un fichier Nafuu Health."); return; }
   if (!o || typeof o !== "object") { toast("Fichier illisible."); return; }
   if (o.type === "nafuu-programme") return importProgram(o);
+  if (o.type === "nafuu-test") return importTestRequest(o);
   if (o.type === "nafuu-rapport") return importReport(o);
   if (o.type === "nafuu-sauvegarde") return importBackup(o);
   toast("Ce fichier n'est pas un fichier Nafuu Health.");
@@ -291,6 +292,19 @@ function sampleProgram() {
   return { type: "nafuu-programme", v: 1, issuedAt: new Date().toISOString(), message: "Programme type : remplace-le par celui de ton coach dès que tu le reçois.",
     coach: { name: "", phone: "" }, pax: { id: (S.pax && S.pax.paxId) || "", name: "" }, cycleWeeks: 4, warmup: SEED_WARMUP,
     sessions: SEED_SESSIONS, exercises: SEED_EXERCISES.filter(e => used[e.id]) };
+}
+function importTestRequest(o) {
+  if (S.role === "coach") { toast("Ce fichier est une demande de test pour un pax. Ouvre-le sur son téléphone."); return; }
+  const coach = { name: str(o.coach && o.coach.name, 80), phone: str(o.coach && o.coach.phone, 20).replace(/\D/g, "") };
+  const paxId = str(o.pax && o.pax.id, 40), paxName = str(o.pax && o.pax.name, 80);
+  if (!S.pax) S.pax = newPax();
+  S.role = "pax";
+  if (!S.pax.coach || !S.pax.coach.phone) S.pax.coach = coach;
+  if (!S.pax.paxId && paxId) S.pax.paxId = paxId;
+  if (!S.pax.profile.firstName && paxName) S.pax.profile.firstName = paxName.split(" ")[0];
+  S.pax.testRequest = { issuedAt: str(o.issuedAt, 40) || new Date().toISOString(), message: str(o.message, 1000) };
+  save(); toast((coach.name || "Ton coach") + " te demande de faire le test de départ.");
+  home();
 }
 function importProgram(o) {
   if (S.role === "coach") { toast("Ce fichier est un programme pour un pax. Ouvre-le sur son téléphone."); return; }
@@ -332,6 +346,8 @@ function importReport(o) {
   if (!p.connectedAt) p.connectedAt = p.lastReportAt;
   p.unseen = true;
   computeProposals(p);
+  const lt = p.tests.filter(t => !t.blocked).sort((a, b) => (a.date < b.date ? -1 : 1)).pop();
+  if (lt && p.draftFromTestId !== lt.id) { p.draft = buildProgramFromTest(lt, p.name); p.draftFromTestId = lt.id; }
   save(); toast("Rapport de " + p.name + " importé.");
   stack = []; go("coachHome"); go("coachPax", { id: p.id });
 }
@@ -411,14 +427,24 @@ function computeProposals(p) {
       if (decided.has(key)) return;
       const base = { key: key, lieu: s.lieu, num: s.num, idx: idx, exId: item.exId, exName: ex.name, from: { sets: item.sets, target: item.target }, status: "pending", date: done[0].d.date };
       const good = r1.allDone && r1.clean && r1.maxEff !== null && r1.maxEff <= 7;
+      const easierEx = ladderStep(item.exId, -1, s.lieu, exs), harderEx = ladderStep(item.exId, 1, s.lieu, exs);
+      const pains = painsOnExercise(p, ex.name, done[0].d.date.slice(0, 10));
+      if (pains.length) {
+        const z = pains.map(x => x.zone.toLowerCase()).join(", ");
+        if (easierEx) p.proposals.push(Object.assign(base, { kind: "easier", newExId: easierEx.id, newName: easierEx.name, to: { sets: item.sets, target: item.target }, reason: "Douleur signalée sur cet exercice (" + z + "). Version plus facile en attendant d'en parler avec lui." }));
+        else p.proposals.push(Object.assign(base, { kind: "target", to: { sets: Math.max(1, item.sets - 1), target: item.target }, reason: "Douleur signalée sur cet exercice (" + z + "). Une série de moins en attendant d'en parler avec lui." }));
+        return;
+      }
       if (r1.maxEff !== null && r1.maxEff >= 9 && r2 && r2.maxEff !== null && r2.maxEff >= 9) {
-        if (ex.easier) p.proposals.push(Object.assign(base, { kind: "easier", newName: ex.easier, to: { sets: item.sets, target: item.target }, reason: "Effort de 9 ou plus sur les deux dernières séances." }));
+        if (easierEx) p.proposals.push(Object.assign(base, { kind: "easier", newExId: easierEx.id, newName: easierEx.name, to: { sets: item.sets, target: item.target }, reason: "Effort de 9 ou plus sur les deux dernières séances." }));
+        else if (ex.easier) p.proposals.push(Object.assign(base, { kind: "easier", newName: ex.easier, to: { sets: item.sets, target: item.target }, reason: "Effort de 9 ou plus sur les deux dernières séances." }));
         else if (ex.unit === "reps" && item.target > 3) p.proposals.push(Object.assign(base, { kind: "target", to: { sets: item.sets, target: Math.max(3, item.target - 2) }, reason: "Effort de 9 ou plus sur les deux dernières séances." }));
         return;
       }
       if (!good) return;
       if (ex.unit === "reps") {
-        if (item.target >= 12 && ex.harder) p.proposals.push(Object.assign(base, { kind: "harder", newName: ex.harder, to: { sets: item.sets, target: 6 }, reason: "Toutes les séries propres à " + item.target + " répétitions, effort " + r1.maxEff + "." }));
+        if (item.target >= 12 && harderEx) p.proposals.push(Object.assign(base, { kind: "harder", newExId: harderEx.id, newName: harderEx.name, to: { sets: item.sets, target: harderEx.unit === "s" ? 20 : 6 }, reason: "Toutes les séries propres à " + item.target + " répétitions, effort " + r1.maxEff + "." }));
+        else if (item.target >= 12 && ex.harder) p.proposals.push(Object.assign(base, { kind: "harder", newName: ex.harder, to: { sets: item.sets, target: 6 }, reason: "Toutes les séries propres à " + item.target + " répétitions, effort " + r1.maxEff + "." }));
         else {
           const inc = r1.maxEff <= 5 ? 2 : 1;
           const nt = Math.min(12, item.target + inc);
@@ -426,10 +452,12 @@ function computeProposals(p) {
         }
       } else if (ex.unit === "s") {
         const nt = item.target + 5;
-        if (ex.plafond && nt >= ex.plafond && ex.harder) p.proposals.push(Object.assign(base, { kind: "harder", newName: ex.harder, to: { sets: item.sets, target: Math.max(10, Math.round(item.target / 2)) }, reason: "Plafond presque atteint, effort " + r1.maxEff + "." }));
+        if (ex.plafond && nt >= ex.plafond && harderEx) p.proposals.push(Object.assign(base, { kind: "harder", newExId: harderEx.id, newName: harderEx.name, to: { sets: item.sets, target: harderEx.unit === "s" ? 20 : 8 }, reason: "Plafond presque atteint, effort " + r1.maxEff + "." }));
+        else if (ex.plafond && nt >= ex.plafond && ex.harder) p.proposals.push(Object.assign(base, { kind: "harder", newName: ex.harder, to: { sets: item.sets, target: Math.max(10, Math.round(item.target / 2)) }, reason: "Plafond presque atteint, effort " + r1.maxEff + "." }));
         else p.proposals.push(Object.assign(base, { kind: "target", to: { sets: item.sets, target: nt }, reason: "Positions tenues propres, effort " + r1.maxEff + "." }));
       } else if (ex.unit === "m") {
-        if (item.sets + 1 > 8) p.proposals.push(Object.assign(base, { kind: "target", to: { sets: 6, target: item.target + 100 }, reason: "8 répétitions propres, on allonge la distance." }));
+        if (item.sets + 1 > 8 && harderEx) p.proposals.push(Object.assign(base, { kind: "harder", newExId: harderEx.id, newName: harderEx.name, to: { sets: 6, target: item.target + 100 }, reason: "8 répétitions propres, on allonge la distance." }));
+        else if (item.sets + 1 > 8) p.proposals.push(Object.assign(base, { kind: "target", to: { sets: 6, target: item.target + 100 }, reason: "8 répétitions propres, on allonge la distance." }));
         else p.proposals.push(Object.assign(base, { kind: "target", to: { sets: item.sets + 1, target: item.target }, reason: "Toutes les répétitions propres, effort " + r1.maxEff + "." }));
       }
     });
@@ -440,7 +468,9 @@ function applyProposal(p, pr, override) {
   const item = s && s.items[pr.idx];
   if (!item || item.exId !== pr.exId) { toast("Le programme a changé depuis : proposition ignorée."); return; }
   const to = override || pr.to;
-  if (pr.kind === "harder" || pr.kind === "easier") {
+  if ((pr.kind === "harder" || pr.kind === "easier") && pr.newExId && S.coach.exercises.some(e => e.id === pr.newExId)) {
+    item.exId = pr.newExId;
+  } else if (pr.kind === "harder" || pr.kind === "easier") {
     const src = S.coach.exercises.find(e => e.id === pr.exId);
     if (!src) { toast("Exercice introuvable dans la bibliothèque."); return; }
     let ne = S.coach.exercises.find(e => e.name.toLowerCase() === pr.newName.toLowerCase());
@@ -626,6 +656,14 @@ VIEWS.paxHome = function () {
       h("div", { class: "lieux" }, opts.map(s => h("button", { class: "btn lieu", onclick: () => startSession(s) }, [
         h("span", { class: "l-name", text: s.lieu === "salle" ? "Salle" : "Maison" }), h("span", { class: "l-sub", text: s.title })
       ])))
+    ]));
+  }
+  if (P.testRequest) {
+    kids.unshift(h("section", { class: "next" }, [
+      h("p", { class: "next-k", text: (P.coach && P.coach.name ? P.coach.name : "Ton coach") + " te demande" }),
+      h("p", { class: "next-n", text: "Test de départ" }),
+      P.testRequest.message ? h("p", { text: P.testRequest.message }) : null,
+      h("button", { class: "btn primary big", text: P.testDraft ? "Reprendre le test" : "Faire le test", onclick: () => go("test") })
     ]));
   }
   if (prog && prog.message) {
@@ -881,7 +919,7 @@ function testBlocked() {
     h("p", { class: "danger-box", text: "Tu as répondu oui à une question sur le cœur, la tension ou un malaise à l'effort. Contacte ton coach avant tout effort. Un avis médical est nécessaire." }),
     S.pax.coach && S.pax.coach.phone ? h("button", { class: "btn primary big", text: "Prévenir mon coach", onclick: () => openWhatsApp(S.pax.coach.phone, "J'ai répondu oui à une question de santé du test de départ, je ne l'ai pas fait.") }) : null
   ], { foot: [h("button", { class: "btn ghost", text: "J'ai compris", onclick: () => {
-    S.pax.tests.push({ id: D.id, date: new Date().toISOString(), blocked: true, skipped: [], values: D.values }); S.pax.testDraft = null; save(); home();
+    S.pax.tests.push({ id: D.id, date: new Date().toISOString(), blocked: true, skipped: [], values: D.values }); S.pax.testDraft = null; S.pax.testRequest = null; save(); home();
   } })] });
 }
 function testEnd() {
@@ -893,6 +931,7 @@ function testEnd() {
     h("button", { class: "btn ghost", text: "Revoir le dernier test", onclick: () => { D.idx -= 1; save(); render(); } }),
     h("button", { class: "btn primary", text: "Enregistrer le test", onclick: () => {
       S.pax.tests.push({ id: D.id, date: new Date().toISOString(), blocked: false, skipped: D.skipped, values: D.values });
+      S.pax.testRequest = null;
       S.pax.testDraft = null; save();
       stack = []; go("sent", { title: "Test enregistré", message: "Test de départ fait." });
     } })
@@ -1015,6 +1054,12 @@ function paxAlerts(p) {
   const pend = (p.proposals || []).filter(x => x.status === "pending").length;
   if (pend) a.push(pend + " progression" + (pend > 1 ? "s" : "") + " à valider");
   if (p.programDirty) a.push("Programme pas encore envoyé");
+  if (p.draft) a.push("Programme proposé d'après le test, à valider");
+  if (p.programSentAt && !p.programDirty) {
+    const weeks = (p.program && p.program.cycleWeeks) || 4, dsent = daysSince(p.programSentAt);
+    const lastT = p.tests.length ? p.tests[p.tests.length - 1].date : null;
+    if (dsent !== null && dsent >= weeks * 7 && (!lastT || lastT < p.programSentAt)) a.push("Cycle de " + weeks + " semaines terminé : envoie-lui le test de départ");
+  }
   return a;
 }
 
@@ -1050,6 +1095,38 @@ VIEWS.coachAddPax = function () {
   } })] });
 };
 
+function sendTest(p) {
+  const file = { type: "nafuu-test", v: 1, issuedAt: new Date().toISOString(), message: (p.testMessage || "").slice(0, 1000),
+    coach: { name: S.coach.name, phone: S.coach.phone }, pax: { id: p.id, name: p.name } };
+  p.testSentAt = file.issuedAt; save();
+  shareFile("test-" + p.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") + ".json", file,
+    "Ton test de départ Nafuu Health. Ouvre le fichier avec Nafuu Health, fais le test puis envoie-moi le rapport.");
+  render();
+}
+VIEWS.draft = function (params) {
+  const p = S.coach.pax.find(x => x.id === params.id);
+  if (!p || !p.draft) return screen("Aucune proposition", null, []);
+  const D = p.draft, exs = exMapAll();
+  const groups = D.program.sessions.map(s => h("section", { class: "detail" }, [
+    h("h3", { text: "Séance " + s.num + ", " + s.lieu + " : " + s.title }),
+    h("ul", { class: "list" }, s.items.map(i => {
+      const e = exs[i.exId] || { name: i.exId, unit: "reps" };
+      return h("li", { text: e.name + " : " + fmtTarget(i, e) + (i.note ? ". " + i.note : "") });
+    }))
+  ]));
+  return screen("Programme proposé", "Pour " + p.name + ", d'après son test", [
+    h("h2", { text: "Pourquoi ces choix" }),
+    h("ul", { class: "list" }, D.reasons.map(r => h("li", { text: r }))),
+    h("p", { class: "hint", text: "Après validation, tu peux encore tout modifier avant d'envoyer." })
+  ].concat(groups), { foot: [
+    h("button", { class: "btn ghost", text: "Ignorer", onclick: () => confirmSheet("Ignorer cette proposition ?", "Le programme actuel reste tel quel.", "Ignorer", () => { p.draft = null; save(); back(); }) }),
+    h("button", { class: "btn primary", text: "Valider", onclick: () => {
+      p.program = JSON.parse(JSON.stringify(D.program)); p.draft = null; p.programDirty = true;
+      p.proposals = (p.proposals || []).filter(x => x.status !== "pending");
+      save(); toast("Programme remplacé. Vérifie-le puis envoie-le."); stack.pop(); go("programEdit", { id: p.id }, false);
+    } })
+  ] });
+};
 function sendProgram(p) {
   const exs = coachEx(), used = {};
   p.program.sessions.forEach(s => s.items.forEach(i => { if (exs[i.exId]) used[i.exId] = exs[i.exId]; }));
@@ -1064,7 +1141,7 @@ VIEWS.coachPax = function (params) {
   const p = S.coach.pax.find(x => x.id === params.id);
   if (!p) return screen("Pax introuvable", null, []);
   if (p.unseen) { p.unseen = false; save(); }
-  const al = paxAlerts(p).filter(x => !/progression|Programme pas/.test(x));
+  const al = paxAlerts(p).filter(x => !/progression|Programme pas|Programme proposé/.test(x));
   const pend = (p.proposals || []).filter(x => x.status === "pending");
   const lastTest = p.tests.length ? p.tests[p.tests.length - 1] : null;
   const notes = area(p.notes, v => { p.notes = v.slice(0, 5000); save(); }, 4);
@@ -1078,6 +1155,17 @@ VIEWS.coachPax = function (params) {
         p.connectedAt ? null : h("button", { class: "btn ghost", text: "Il m'a prévenu", onclick: () => { p.connectedAt = new Date().toISOString(); save(); toast(p.name + " est noté comme connecté."); render(); } })
       ])
     ]),
+    h("section", null, [
+      h("h2", { text: "Test de départ" }),
+      h("p", { class: "hint", text: p.testSentAt ? "Envoyé le " + frDate(p.testSentAt) + (p.tests.some(t => t.date > p.testSentAt) ? ", résultats reçus." : ", en attente de ses résultats.")
+        : p.tests.length ? "Résultats reçus le " + frDate(p.tests[p.tests.length - 1].date) + "." : "Pas encore envoyé." }),
+      h("button", { class: "btn ghost", text: p.testSentAt || p.tests.length ? "Renvoyer le test de départ" : "Envoyer le test de départ", onclick: () => sendTest(p) })
+    ]),
+    p.draft ? h("section", null, [
+      h("h2", { text: "Programme proposé d'après le test" }),
+      h("p", { class: "hint", text: "Préparé automatiquement le " + frDate(p.draft.createdAt) + ". Rien n'est envoyé sans toi." }),
+      h("div", { class: "row" }, [h("button", { class: "btn primary", text: "Voir et valider", onclick: () => go("draft", { id: p.id }) })])
+    ]) : null,
     h("section", null, [
       h("h2", { text: "Programme" }),
       h("p", { class: "hint", text: p.programSentAt ? (p.programDirty ? "Modifié depuis le dernier envoi du " + frDate(p.programSentAt) : "Envoyé le " + frDate(p.programSentAt)) : "Jamais envoyé" }),
@@ -1311,6 +1399,7 @@ if (!NB && "serviceWorker" in navigator && (location.protocol === "https:" || lo
   navigator.serviceWorker.register("sw.js").catch(() => {});
 }
 if (!NB && navigator.storage && navigator.storage.persist) { navigator.storage.persist().catch(() => {}); }
+if (migrateCoachLibrary()) save();
 readInvite();
 home();
 window.addEventListener("hashchange", () => { if (/^#i=/.test(location.hash)) { readInvite(); home(); } });
