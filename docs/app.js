@@ -249,7 +249,9 @@ function paxEx() { return exMap(S.pax.program ? S.pax.program.exercises : []); }
 
 /* ---------- Import de fichiers ---------- */
 
-function pickFile() {
+let importTarget = null;
+function pickFile(targetPaxId) {
+  importTarget = typeof targetPaxId === "string" ? targetPaxId : null;
   const inp = h("input", { type: "file", accept: ".json,application/json,text/plain", class: "hidden" });
   inp.addEventListener("change", () => {
     const f = inp.files && inp.files[0]; inp.remove();
@@ -333,22 +335,26 @@ function importProgram(o) {
 function importReport(o) {
   if (S.role !== "coach") { toast("Ce fichier est un rapport pour le coach. Envoie-le-lui."); return; }
   const id = str(o.paxId, 40);
-  if (!id) { toast("Rapport sans identifiant de pax."); return; }
-  let p = S.coach.pax.find(x => x.id === id);
+  const forced = importTarget ? S.coach.pax.find(x => x.id === importTarget) : null;
+  importTarget = null;
+  if (!id && !forced) { toast("Rapport sans identifiant de pax."); return; }
+  let p = forced || S.coach.pax.find(x => x.id === id);
   if (!p) { p = newCoachPax(str(o.profile && o.profile.firstName, 80) || "Pax", id); S.coach.pax.push(p); }
-  p.profile = { firstName: str(o.profile && o.profile.firstName, 80), birth: str(o.profile && o.profile.birth, 20) };
-  p.consent = o.consent && typeof o.consent === "object" ? { date: str(o.consent.date, 40), health: !!o.consent.health, version: str(o.consent.version, 10), parent: str(o.consent.parent, 80) } : null;
+  if (o.profile && o.profile.birth) p.profile = { firstName: str(o.profile.firstName, 80), birth: str(o.profile.birth, 20) };
+  if (o.consent) p.consent = o.consent && typeof o.consent === "object" ? { date: str(o.consent.date, 40), health: !!o.consent.health, version: str(o.consent.version, 10), parent: str(o.consent.parent, 80) } : null;
   mergeById(p.sessions, arr(o.sessions, 2000).map(cleanDoneSession));
   mergeById(p.tests, arr(o.tests, 100).map(t => ({ id: str(t.id, 40), date: str(t.date, 40), blocked: !!t.blocked, skipped: arr(t.skipped, 20).map(x => str(x, 40)), values: cleanValues(t.values) })));
   mergeById(p.measures, arr(o.measures, 2000).map(m => ({ id: str(m.id, 40), date: str(m.date, 40), poids: num(m.poids), tour: num(m.tour), pouls: num(m.pouls) })));
   mergeById(p.pains, arr(o.pains, 2000).map(cleanPain));
-  p.lastReportAt = str(o.generatedAt, 40) || new Date().toISOString();
-  if (!p.connectedAt) p.connectedAt = p.lastReportAt;
+  if (!forced) {
+    p.lastReportAt = str(o.generatedAt, 40) || new Date().toISOString();
+    if (!p.connectedAt) p.connectedAt = p.lastReportAt;
+  }
   p.unseen = true;
   computeProposals(p);
   const lt = p.tests.filter(t => !t.blocked).sort((a, b) => (a.date < b.date ? -1 : 1)).pop();
   if (lt && p.draftFromTestId !== lt.id) { p.draft = buildProgramFromTest(lt, p.name); p.draftFromTestId = lt.id; }
-  save(); toast("Rapport de " + p.name + " importé.");
+  save(); toast((forced ? "Test ajouté à " : "Rapport de ") + p.name + (forced ? "." : " importé."));
   stack = []; go("coachHome"); go("coachPax", { id: p.id });
 }
 function cleanDoneSession(s) {
@@ -1159,7 +1165,10 @@ VIEWS.coachPax = function (params) {
       h("h2", { text: "Test de départ" }),
       h("p", { class: "hint", text: p.testSentAt ? "Envoyé le " + frDate(p.testSentAt) + (p.tests.some(t => t.date > p.testSentAt) ? ", résultats reçus." : ", en attente de ses résultats.")
         : p.tests.length ? "Résultats reçus le " + frDate(p.tests[p.tests.length - 1].date) + "." : "Pas encore envoyé." }),
-      h("button", { class: "btn ghost", text: p.testSentAt || p.tests.length ? "Renvoyer le test de départ" : "Envoyer le test de départ", onclick: () => sendTest(p) })
+      h("div", { class: "row" }, [
+        h("button", { class: "btn ghost", text: p.testSentAt || p.tests.length ? "Renvoyer le test de départ" : "Envoyer le test de départ", onclick: () => sendTest(p) }),
+        h("button", { class: "btn ghost", text: "Importer un test pour " + p.name.split(" ")[0], onclick: () => pickFile(p.id) })
+      ])
     ]),
     p.draft ? h("section", null, [
       h("h2", { text: "Programme proposé d'après le test" }),
@@ -1226,6 +1235,7 @@ function proposalCard(p, pr) {
 function testLabel(testId, fieldId) {
   for (const b of TEST_BLOCKS) for (const t of b.tests) if (t.id === testId) {
     const f = t.fields.find(x => x.id === fieldId);
+    if (!f && (fieldId === "note" || fieldId === "notes")) return { test: t.name, field: "Remarque", unit: "" };
     return { test: t.name, field: f ? f.label : fieldId, unit: f && f.type === "chrono" ? "s" : (f && f.unit) || "" };
   }
   return { test: testId, field: fieldId, unit: "" };
