@@ -6,7 +6,7 @@ Code de sortie 0 si tout est conforme, 1 sinon. Exécuté automatiquement par Gi
 Vérifie :
 - docs/ : CSP stricte (rien d'inline, aucun hôte externe), références locales valides, aucune ressource externe,
   aucun fichier sensible ou trop lourd, liste hors connexion du service worker complète ;
-- code JavaScript : pas d'injection HTML (innerHTML, eval...), pas d'appel réseau, seul lien externe : wa.me ;
+- code JavaScript : pas d'injection HTML (innerHTML, eval...), pas d'appel réseau, seuls liens externes : wa.me et l'adresse de l'app ;
 - dépôt : aucune clé de signature, mot de passe, APK ou fichier de pax versionné ;
 - .github/workflows/ : actions épinglées par SHA, permissions déclarées, pas de pull_request_target,
   pas d'injection via le contexte github.event, identifiants de checkout non conservés.
@@ -107,7 +107,7 @@ for js in sorted(DOCS.rglob("*.js")):
         if re.search(motif, t):
             err(f"{nom}: {raison} ({motif})")
     for url in re.findall(r"https?://[^\s\"'`)]+", t):
-        if not url.startswith("https://wa.me/"):
+        if not (url.startswith("https://wa.me/") or url == "https://nafuu973.github.io/nafuu-health/"):
             err(f"{nom}: adresse externe non prévue : {url}")
     if js.name != "sw.js" and re.search(r"\bfetch\s*\(", t):
         err(f"{nom}: appel réseau fetch() interdit hors du service worker")
