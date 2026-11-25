@@ -507,23 +507,31 @@ async function streamBytes(bytes, stream) {
   return new Uint8Array(await out.arrayBuffer());
 }
 async function makeDataLink(obj) {
+  const packed = typeof packAny === "function" ? packAny(obj) : null;
+  if (packed && window.CompressionStream) {
+    return APP_URL + "#c=" + bytesToB64url(await streamBytes(new TextEncoder().encode(JSON.stringify(packed)), new CompressionStream("gzip")));
+  }
   const raw = new TextEncoder().encode(JSON.stringify(obj));
   if (window.CompressionStream) return APP_URL + "#z=" + bytesToB64url(await streamBytes(raw, new CompressionStream("gzip")));
   return APP_URL + "#d=" + bytesToB64url(raw);
 }
 async function readDataHash(hash) {
-  const m = /^#([zd])=([A-Za-z0-9_-]+)$/.exec(hash || "");
+  const m = /^#([zdc])=([A-Za-z0-9_-]+)$/.exec(hash || "");
   if (!m || m[2].length > LINK_MAX * 2) return null;
   let bytes = b64urlToBytes(m[2]);
-  if (m[1] === "z") {
+  if (m[1] === "z" || m[1] === "c") {
     if (!window.DecompressionStream) throw new Error("Navigateur trop ancien");
     bytes = await streamBytes(bytes, new DecompressionStream("gzip"));
   }
   if (bytes.length > MAX_IMPORT) throw new Error("Trop gros");
-  return new TextDecoder().decode(bytes);
+  const text = new TextDecoder().decode(bytes);
+  if (m[1] !== "c") return text;
+  const obj = unpackAny(JSON.parse(text));
+  if (!obj) throw new Error("Format inconnu");
+  return JSON.stringify(obj);
 }
 async function importFromText(text) {
-  const m = /#[zd]=[A-Za-z0-9_-]+/.exec(String(text || ""));
+  const m = /#[zdc]=[A-Za-z0-9_-]+/.exec(String(text || ""));
   if (!m) { const t = String(text || "").trim(); if (t.startsWith("{")) { handleImport(t); return true; } toast("Aucun lien Nafuu Health trouvé dans ce texte."); return false; }
   try { const t = await readDataHash(m[0]); if (!t) throw new Error("vide"); handleImport(t); return true; }
   catch (e) { toast("Lien illisible ou incomplet. Demande qu'on te le renvoie."); return false; }
@@ -1044,14 +1052,14 @@ VIEWS.measures = function () {
 
 function buildReport(since) {
   const P = S.pax;
-  const from = since ? new Date(new Date(since).getTime() - 14 * 86400000).toISOString() : "";
+  const from = since || "";
   const recent = list => list.filter(x => !from || (x.date || "") >= from);
   return { type: "nafuu-rapport", v: 1, generatedAt: new Date().toISOString(), paxId: P.paxId || (P.paxId = uid()), profile: P.profile, consent: P.consent,
     sessions: recent(P.sessions), tests: P.tests, measures: recent(P.measures), pains: recent(P.pains) };
 }
-function sendReport(message) {
-  const P = S.pax, since = P.lastReportAt, r = buildReport(since); P.lastReportAt = r.generatedAt; save();
-  sendLink(r, (message || ("Rapport de " + (P.profile.firstName || "ton pax"))) + " Ouvre le lien pour l'ajouter dans Nafuu Health :",
+function sendReport(message, all) {
+  const P = S.pax, since = all ? null : P.lastReportAt, r = buildReport(since); P.lastReportAt = r.generatedAt; save();
+  sendLink(r, (message || ("Rapport de " + (P.profile.firstName || "ton pax") + ".")) + "\nAppuie sur le lien pour l'ajouter dans Nafuu Health :",
     P.coach && P.coach.phone, "rapport-" + (P.profile.firstName || "pax").toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-" + r.generatedAt.slice(0, 10) + ".json");
 }
 VIEWS.sent = function (params) {
@@ -1068,8 +1076,9 @@ VIEWS.sent = function (params) {
 VIEWS.report = function () {
   const P = S.pax;
   return screen("Envoyer mon rapport", null, [
-    h("p", { text: "Le rapport contient tes séances, tes tests, tes mesures et les douleurs signalées. Choisis WhatsApp puis la conversation avec ton coach." }),
-    P.lastReportAt ? h("p", { class: "hint", text: "Dernier envoi : " + frDate(P.lastReportAt) }) : null
+    h("p", { text: "Le rapport contient ce qui est nouveau depuis ton dernier envoi : séances, tests, mesures et douleurs signalées. WhatsApp s'ouvre sur la conversation avec ton coach." }),
+    P.lastReportAt ? h("p", { class: "hint", text: "Dernier envoi : " + frDate(P.lastReportAt) }) : null,
+    P.lastReportAt ? h("button", { class: "link", text: "Ton coach n'a pas reçu un envoi ? Tout renvoyer", onclick: () => sendReport(null, true) }) : null
   ], { foot: [h("button", { class: "btn primary big", text: "Envoyer le rapport", onclick: () => {
     sendReport();
   } })] });
@@ -1166,7 +1175,7 @@ function sendTest(p) {
   const file = { type: "nafuu-test", v: 1, issuedAt: new Date().toISOString(), message: (p.testMessage || "").slice(0, 1000),
     coach: { name: S.coach.name, phone: S.coach.phone }, pax: { id: p.id, name: p.name } };
   p.testSentAt = file.issuedAt; save();
-  sendLink(file, "Ton test de départ : ouvre ce lien, il s'ouvre dans Nafuu Health. Fais le test puis envoie-moi le rapport.", p.phone,
+  sendLink(file, "Ton test de départ est prêt. Appuie sur le lien pour l'ouvrir dans Nafuu Health :", p.phone,
     "test-" + p.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") + ".json");
   render();
 }
@@ -1200,7 +1209,7 @@ function sendProgram(p) {
   const file = { type: "nafuu-programme", v: 1, issuedAt: new Date().toISOString(), message: (p.messageDraft || "").slice(0, 1000), coach: { name: S.coach.name, phone: S.coach.phone },
     pax: { id: p.id, name: p.name }, cycleWeeks: p.program.cycleWeeks, warmup: p.program.warmup, sessions: p.program.sessions, exercises: Object.values(used) };
   p.programSentAt = file.issuedAt; p.programDirty = false; save();
-  sendLink(file, "Ton programme" + (p.messageDraft ? " : " + p.messageDraft.slice(0, 300) : "") + ". Ouvre ce lien, il s'ouvre dans Nafuu Health :", p.phone,
+  sendLink(file, (p.messageDraft ? p.messageDraft.slice(0, 300) + "\n\n" : "") + "Ton programme est prêt. Appuie sur le lien pour l'ouvrir dans Nafuu Health :", p.phone,
     "programme-" + p.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") + ".json");
 }
 
@@ -1486,7 +1495,7 @@ readInvite();
 home();
 async function readDataLink() {
   const h0 = location.hash || "";
-  if (!/^#[zd]=/.test(h0)) return;
+  if (!/^#[zdc]=/.test(h0)) return;
   history.replaceState(null, "", location.pathname + location.search);
   if (isIOS() && !isInstalled()) {
     // Sur iPhone, Safari et l'app installée ne partagent pas leurs données.
@@ -1501,7 +1510,7 @@ VIEWS.iosLink = function (params) {
   ], { noBack: true });
 };
 readDataLink();
-window.addEventListener("hashchange", () => { if (/^#i=/.test(location.hash)) { readInvite(); home(); } else if (/^#[zd]=/.test(location.hash)) readDataLink(); });
+window.addEventListener("hashchange", () => { if (/^#i=/.test(location.hash)) { readInvite(); home(); } else if (/^#[zdc]=/.test(location.hash)) readDataLink(); });
 if (!NB && /[?&]partage=1/.test(location.search) && window.caches) {
   history.replaceState(null, "", location.pathname);
   caches.open("nafuu-health-partage").then(c => c.match("./fichier-recu").then(r => r ? r.text().then(t => { c.delete("./fichier-recu"); handleImport(t); }) : null)).catch(() => {});
