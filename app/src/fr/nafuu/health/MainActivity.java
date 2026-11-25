@@ -312,7 +312,7 @@ public class MainActivity extends Activity {
         public void openWhatsApp(String phone, String text) {
             String digits = phone == null ? "" : phone.replaceAll("\\D", "");
             if (digits.length() < 6 || digits.length() > 15) return;
-            String msg = text == null ? "" : (text.length() > 500 ? text.substring(0, 500) : text);
+            String msg = text == null ? "" : (text.length() > 12000 ? text.substring(0, 12000) : text);
             Uri uri = Uri.parse("https://wa.me/" + digits + "?text=" + Uri.encode(msg));
             runOnUiThread(() -> {
                 try {
