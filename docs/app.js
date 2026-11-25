@@ -120,7 +120,15 @@ function go(view, params, replace) {
   render();
 }
 function back() { if (stack.length > 1) { stack.pop(); render(); return true; } return false; }
-function home() { stack = []; go(S.role === "coach" ? "coachHome" : S.role === "pax" ? (S.pax && S.pax.consent ? "paxHome" : "paxConsent") : "welcome"); }
+function home() {
+  stack = [];
+  if (S.role === "coach") return go("coachHome");
+  if (S.role !== "pax") return go("welcome");
+  const P = S.pax;
+  if (!P.consent) return go(P.invited ? "invited" : "paxConsent");
+  if (P.coach && P.coach.phone && !P.announcedAt && !P.announceSkipped) return go("announce");
+  go("paxHome");
+}
 window.nafuuBack = function () {
   const sheet = document.querySelector(".sheet-wrap");
   if (sheet) { sheet.remove(); return true; }
@@ -321,6 +329,7 @@ function importReport(o) {
   mergeById(p.measures, arr(o.measures, 2000).map(m => ({ id: str(m.id, 40), date: str(m.date, 40), poids: num(m.poids), tour: num(m.tour), pouls: num(m.pouls) })));
   mergeById(p.pains, arr(o.pains, 2000).map(cleanPain));
   p.lastReportAt = str(o.generatedAt, 40) || new Date().toISOString();
+  if (!p.connectedAt) p.connectedAt = p.lastReportAt;
   p.unseen = true;
   computeProposals(p);
   save(); toast("Rapport de " + p.name + " importé.");
@@ -446,6 +455,56 @@ function applyProposal(p, pr, override) {
   p.programDirty = true;
 }
 
+/* ---------- Invitation ---------- */
+
+const APP_URL = "https://nafuu973.github.io/nafuu-health/";
+function b64urlEncode(obj) {
+  const bytes = new TextEncoder().encode(JSON.stringify(obj));
+  let bin = ""; bytes.forEach(b => { bin += String.fromCharCode(b); });
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function b64urlDecode(t) {
+  if (typeof t !== "string" || t.length > 600 || !/^[A-Za-z0-9_-]+$/.test(t)) return null;
+  try {
+    const bin = atob(t.replace(/-/g, "+").replace(/_/g, "/"));
+    const o = JSON.parse(new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0))));
+    if (!o || typeof o !== "object") return null;
+    const inv = { coachName: str(o.c, 80), coachPhone: str(o.p, 20).replace(/\D/g, ""), paxId: str(o.i, 40), paxName: str(o.n, 80) };
+    return inv.coachName && inv.paxId ? inv : null;
+  } catch (e) { return null; }
+}
+function inviteLink(p) { return APP_URL + "#i=" + b64urlEncode({ c: S.coach.name, p: S.coach.phone, i: p.id, n: p.name }); }
+function sendInvite(p) {
+  if (!p.phone) { toast("Indique d'abord le WhatsApp de " + p.name + ", dans Contact."); return; }
+  const first = p.name.split(" ")[0];
+  const text = "Salut " + first + ", c'est " + S.coach.name + ", ton coach. Je te suis maintenant avec l'app Nafuu Health. " +
+    "Ouvre ce lien, installe l'app et suis les étapes : " + inviteLink(p);
+  p.invitedAt = new Date().toISOString(); save();
+  openWhatsApp(p.phone, text);
+  render();
+}
+function announceText() {
+  const P = S.pax;
+  return "Salut " + (P.coach && P.coach.name ? P.coach.name : "coach") + ", c'est " + (P.profile.firstName || "ton pax") +
+    ". J'ai installé Nafuu Health, c'est bon pour moi" + (P.program ? ", j'ai bien reçu mon programme." : ", j'attends mon programme.");
+}
+function readInvite() {
+  const m = /^#i=([A-Za-z0-9_-]+)$/.exec(location.hash || "");
+  if (!m) return;
+  history.replaceState(null, "", location.pathname + location.search);
+  const inv = b64urlDecode(m[1]);
+  if (!inv) { toast("Lien d'invitation illisible. Demande à ton coach de te le renvoyer."); return; }
+  if (S.role === "coach") return;
+  S.role = "pax";
+  S.pax = S.pax || newPax();
+  if (S.pax.paxId && S.pax.paxId !== inv.paxId && S.pax.sessions.length) { toast("Cette app suit déjà un autre profil."); return; }
+  S.pax.paxId = inv.paxId;
+  S.pax.coach = { name: inv.coachName, phone: inv.coachPhone };
+  if (!S.pax.profile.firstName) S.pax.profile.firstName = inv.paxName.split(" ")[0];
+  S.pax.invited = true;
+  save();
+}
+
 /* ---------- Écrans ---------- */
 
 const VIEWS = {};
@@ -464,6 +523,34 @@ VIEWS.welcome = function () {
     h("button", { class: "link", text: "Restaurer une sauvegarde", onclick: pickFile }),
     isInstalled() ? null : h("nav", { class: "menu" }, [installRow()])
   ], { noBack: true });
+};
+
+VIEWS.invited = function () {
+  const P = S.pax, coach = P.coach && P.coach.name ? P.coach.name : "Ton coach";
+  return screen(coach + " est ton coach", "Bienvenue sur Nafuu Health", [
+    h("p", { class: "lead", text: coach + " va suivre tes séances avec cette app : ton programme, tes progrès, et tes questions sur chaque exercice." }),
+    isInstalled() ? null : h("section", { class: "info" }, [
+      h("h2", { text: "D'abord, installe l'app" }),
+      h("p", { text: "Installe-la sur ton téléphone, puis ouvre-la toujours depuis son icône. C'est là que tes données sont gardées." }),
+      h("button", { class: "btn primary", text: "Installer l'app", onclick: () => go("install") }),
+      h("p", { class: "hint", text: "Sur iPhone, l'app installée repart de zéro : choisis « Je suis suivi par un coach ». Ton coach sera reconnu dès que tu ouvriras le programme qu'il t'envoie." })
+    ]),
+    h("ol", { class: "steps" }, [
+      h("li", { text: "Tu remplis ton prénom et tu acceptes les conditions." }),
+      h("li", { text: "Tu préviens " + coach + " que tu es prêt, en un appui." }),
+      h("li", { text: coach + " t'envoie ton programme sur WhatsApp, tu l'ouvres avec Nafuu Health." })
+    ])
+  ], { noBack: true, foot: [h("button", { class: "btn primary big", text: "Continuer", onclick: () => go("paxConsent", {}, true) })] });
+};
+VIEWS.announce = function () {
+  const P = S.pax, coach = P.coach && P.coach.name ? P.coach.name : "ton coach";
+  return screen("Préviens " + coach, null, [
+    h("p", { text: "Envoie-lui un message pour lui dire que tu es prêt. Il saura que tu as bien installé l'app" + (P.program ? "." : " et t'enverra ton programme.") }),
+    h("p", { class: "hint", text: "Message envoyé : « " + announceText() + " »" })
+  ], { noBack: true, foot: [
+    h("button", { class: "btn ghost", text: "Plus tard", onclick: () => { P.announceSkipped = true; save(); home(); } }),
+    h("button", { class: "btn primary", text: "Prévenir sur WhatsApp", onclick: () => { P.announcedAt = new Date().toISOString(); save(); openWhatsApp(P.coach.phone, announceText()); home(); } })
+  ] });
 };
 
 /* ----- Pax : consentement ----- */
@@ -556,6 +643,7 @@ VIEWS.paxHome = function () {
     navRow("Mesures", "Poids, tour de taille, pouls", () => go("measures")),
     navRow("Envoyer mon rapport au coach", newCount ? newCount + " nouveautés depuis le dernier envoi" : "Rien de nouveau", () => go("report"), newCount ? String(newCount) : null),
     prog ? navRow("Importer un nouveau programme", "Quand ton coach t'en envoie un", pickFile) : null,
+    P.coach && P.coach.phone && !P.announcedAt ? navRow("Prévenir mon coach que je suis prêt", "Un message WhatsApp en un appui", () => go("announce")) : null,
     navRow("Réglages", "Données, sauvegarde, effacement", () => go("paxSettings")),
     installRow()
   ]));
@@ -915,6 +1003,7 @@ VIEWS.coachSetup = function () {
 
 function paxAlerts(p) {
   const a = [];
+  if (!p.connectedAt) a.push(p.invitedAt ? "Invité le " + shortDate(p.invitedAt) + ", pas encore confirmé" : "Pas encore invité");
   const last = p.sessions.length ? p.sessions.slice().sort((x, y) => (x.date < y.date ? 1 : -1))[0] : null;
   const ds = last ? daysSince(last.date) : null;
   if (p.tests.some(t => t.blocked)) a.push("Test bloqué par une question de santé");
@@ -950,13 +1039,14 @@ VIEWS.coachHome = function () {
 };
 
 VIEWS.coachAddPax = function () {
-  let name = "";
+  let name = "", phone = "";
   return screen("Nouveau pax", null, [
     field("Prénom et nom", input("text", "", v => { name = v; })),
+    field("Son WhatsApp", input("tel", "", v => { let d = v.replace(/[^\d+]/g, ""); if (d.startsWith("0")) d = "33" + d.slice(1); phone = d.replace(/\D/g, "").slice(0, 15); }, { inputmode: "tel", placeholder: "+33 6 12 34 56 78" }), "Pour lui envoyer l'invitation et ses programmes."),
     h("p", { class: "hint", text: "Le pax reçoit le programme type (maison et salle). Tu peux le modifier avant de l'envoyer." })
   ], { foot: [h("button", { class: "btn primary big", text: "Ajouter", onclick: () => {
     if (!name.trim()) return toast("Indique un nom.");
-    const p = newCoachPax(name.trim().slice(0, 80)); S.coach.pax.push(p); save(); go("coachPax", { id: p.id }, true);
+    const p = newCoachPax(name.trim().slice(0, 80)); p.phone = phone; S.coach.pax.push(p); save(); go("coachPax", { id: p.id }, true);
   } })] });
 };
 
@@ -980,6 +1070,14 @@ VIEWS.coachPax = function (params) {
   const notes = area(p.notes, v => { p.notes = v.slice(0, 5000); save(); }, 4);
   return screen(p.name, p.lastReportAt ? "Dernier rapport le " + frDate(p.lastReportAt) : "Aucun rapport reçu", [
     al.length ? h("section", { class: "alerts" }, al.map(x => h("p", { class: "warn", text: x }))) : null,
+    h("section", null, [
+      h("h2", { text: "Connexion" }),
+      h("p", { class: p.connectedAt ? "" : "hint", text: p.connectedAt ? "Connecté depuis le " + frDate(p.connectedAt) + "." : (p.invitedAt ? "Invitation envoyée le " + frDate(p.invitedAt) + ". Il te préviendra sur WhatsApp une fois l'app installée." : "Pas encore invité.") }),
+      h("div", { class: "row" }, [
+        h("button", { class: "btn primary", text: p.invitedAt ? "Renvoyer l'invitation" : "Inviter sur WhatsApp", onclick: () => sendInvite(p) }),
+        p.connectedAt ? null : h("button", { class: "btn ghost", text: "Il m'a prévenu", onclick: () => { p.connectedAt = new Date().toISOString(); save(); toast(p.name + " est noté comme connecté."); render(); } })
+      ])
+    ]),
     h("section", null, [
       h("h2", { text: "Programme" }),
       h("p", { class: "hint", text: p.programSentAt ? (p.programDirty ? "Modifié depuis le dernier envoi du " + frDate(p.programSentAt) : "Envoyé le " + frDate(p.programSentAt)) : "Jamais envoyé" }),
@@ -1213,7 +1311,9 @@ if (!NB && "serviceWorker" in navigator && (location.protocol === "https:" || lo
   navigator.serviceWorker.register("sw.js").catch(() => {});
 }
 if (!NB && navigator.storage && navigator.storage.persist) { navigator.storage.persist().catch(() => {}); }
+readInvite();
 home();
+window.addEventListener("hashchange", () => { if (/^#i=/.test(location.hash)) { readInvite(); home(); } });
 if (!NB && /[?&]partage=1/.test(location.search) && window.caches) {
   history.replaceState(null, "", location.pathname);
   caches.open("nafuu-health-partage").then(c => c.match("./fichier-recu").then(r => r ? r.text().then(t => { c.delete("./fichier-recu"); handleImport(t); }) : null)).catch(() => {});
