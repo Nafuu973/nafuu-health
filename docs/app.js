@@ -277,6 +277,13 @@ function cleanSessionTpl(s) {
       target: Math.max(0, Math.min(10000, num(i.target) || 0)), note: str(i.note, 300) })) };
 }
 
+function sampleProgram() {
+  const used = {};
+  SEED_SESSIONS.forEach(x => x.items.forEach(i => { used[i.exId] = true; }));
+  return { type: "nafuu-programme", v: 1, issuedAt: new Date().toISOString(), message: "Programme type : remplace-le par celui de ton coach dès que tu le reçois.",
+    coach: { name: "", phone: "" }, pax: { id: (S.pax && S.pax.paxId) || "", name: "" }, cycleWeeks: 4, warmup: SEED_WARMUP,
+    sessions: SEED_SESSIONS, exercises: SEED_EXERCISES.filter(e => used[e.id]) };
+}
 function importProgram(o) {
   if (S.role === "coach") { toast("Ce fichier est un programme pour un pax. Ouvre-le sur son téléphone."); return; }
   const prog = {
@@ -518,7 +525,8 @@ VIEWS.paxHome = function () {
     kids.push(h("section", { class: "next" }, [
       h("p", { class: "next-n", text: "Pas encore de programme" }),
       h("p", { text: "Ton coach t'envoie un fichier sur WhatsApp. Ouvre-le avec Nafuu Health, ou enregistre-le dans ton téléphone puis importe-le ici." }),
-      h("button", { class: "btn primary big", text: "Importer mon programme", onclick: pickFile })
+      h("button", { class: "btn primary big", text: "Importer mon programme", onclick: pickFile }),
+      h("button", { class: "btn ghost", text: "Essayer avec le programme type", onclick: () => importProgram(sampleProgram()) })
     ]));
   } else {
     const opts = prog.sessions.filter(s => s.num === P.nextNum);
